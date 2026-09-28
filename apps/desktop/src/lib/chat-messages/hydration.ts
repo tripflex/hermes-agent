@@ -287,7 +287,11 @@ export function toChatMessages(messages: SessionMessage[]): ChatMessage[] {
   // backend rows, so the folded message has to report how many it covers
   // (see ChatMessage.serverRowSpan).
   let pendingToolRows = 0
+  let pendingToolEndRowId: number | undefined
   let activeAssistantIndex: null | number = null
+
+  const maxRowId = (current: number | undefined, rowId: number | undefined): number | undefined =>
+    rowId === undefined ? current : current === undefined || rowId > current ? rowId : current
   // Todo history is stateful. Only a result from the nearest prior assistant
   // call in this turn may update it; a display-only orphan can still render.
   let nearestAssistant: null | SessionMessage = null
@@ -324,6 +328,7 @@ export function toChatMessages(messages: SessionMessage[]): ChatMessage[] {
     pendingToolParts = []
     pendingToolTimestamp = undefined
     pendingToolRows = 0
+    pendingToolEndRowId = undefined
   }
 
   /** Attribute `rows` backend rows to a folded message (absent field means one). */
@@ -356,6 +361,7 @@ export function toChatMessages(messages: SessionMessage[]): ChatMessage[] {
     active.durableComplete = false
     active.timestamp = earliestTimestamp(active.timestamp, timestamp, ...parts.map(part => part.timestamp))
     absorbRows(active, pendingToolRows)
+    active.endRowId = maxRowId(active.endRowId, pendingToolEndRowId)
 
     return true
   }
@@ -371,6 +377,7 @@ export function toChatMessages(messages: SessionMessage[]): ChatMessage[] {
         role: 'assistant',
         parts: pendingToolParts,
         durableComplete: false,
+        ...(pendingToolEndRowId !== undefined ? { endRowId: pendingToolEndRowId } : {}),
         ...(pendingToolRows > 1 ? { serverRowSpan: pendingToolRows } : {}),
         timestamp: pendingToolTimestamp
       })
@@ -388,10 +395,12 @@ export function toChatMessages(messages: SessionMessage[]): ChatMessage[] {
     }
 
     if (message.role === 'tool') {
+      const toolRowId = message.row_id ?? (typeof message.id === 'number' ? message.id : undefined)
       if (isTodoToolName(message.tool_name) && !pairedTodoResult(message)) {
         pendingToolParts = [...pendingToolParts, storedToolMessagePart(message, index)]
         pendingToolTimestamp ??= message.timestamp
         pendingToolRows += 1
+        pendingToolEndRowId = maxRowId(pendingToolEndRowId, toolRowId)
 
         return
       }
@@ -401,17 +410,19 @@ export function toChatMessages(messages: SessionMessage[]): ChatMessage[] {
       if (updatedPendingToolParts) {
         pendingToolParts = updatedPendingToolParts
         pendingToolRows += 1
+        pendingToolEndRowId = maxRowId(pendingToolEndRowId, toolRowId)
 
         return
       }
 
-      if (applyStoredToolResult(result, message)) {
+      if (applyStoredToolResult(result, message, toolRowId)) {
         return
       }
 
       pendingToolParts = [...pendingToolParts, storedToolMessagePart(message, index)]
       pendingToolTimestamp ??= message.timestamp
       pendingToolRows += 1
+      pendingToolEndRowId = maxRowId(pendingToolEndRowId, toolRowId)
 
       return
     }
@@ -516,17 +527,20 @@ export function toChatMessages(messages: SessionMessage[]): ChatMessage[] {
       pendingToolParts = [...pendingToolParts, ...parts]
       pendingToolTimestamp ??= message.timestamp
       pendingToolRows += 1
+      pendingToolEndRowId = maxRowId(pendingToolEndRowId, rowId)
 
       return
     }
 
     let pendingAbsorbedRows = 0
+    let pendingAbsorbedEndRowId: number | undefined
 
     if (message.role === 'assistant') {
       if (pendingToolParts.length) {
         if (!appendPartsToActiveAssistant(pendingToolParts, message.timestamp ?? pendingToolTimestamp)) {
           parts.unshift(...pendingToolParts)
           pendingAbsorbedRows = pendingToolRows
+          pendingAbsorbedEndRowId = pendingToolEndRowId
         }
 
         clearPendingTools()
@@ -549,6 +563,7 @@ export function toChatMessages(messages: SessionMessage[]): ChatMessage[] {
           ...parts.map(part => part.timestamp)
         )
         absorbRows(activeAssistant, 1)
+        activeAssistant.endRowId = maxRowId(activeAssistant.endRowId, rowId)
 
         return
       }
@@ -571,6 +586,9 @@ export function toChatMessages(messages: SessionMessage[]): ChatMessage[] {
       ...(message.display_kind === 'process_complete' ? { asyncResultKind: 'process' as const } : {}),
       ...(isMachineNotice(message.display_kind) ? { systemNotice: true } : {}),
       timestamp: earliestTimestamp(message.timestamp, ...parts.map(part => part.timestamp)),
+      ...(rowId !== undefined || pendingAbsorbedEndRowId !== undefined
+        ? { endRowId: maxRowId(rowId, pendingAbsorbedEndRowId) }
+        : {}),
       ...(rowId !== undefined ? { rowId } : {}),
       ...(pendingAbsorbedRows > 0 ? { serverRowSpan: pendingAbsorbedRows + 1 } : {}),
       ...(reactions.length ? { reactions } : {}),

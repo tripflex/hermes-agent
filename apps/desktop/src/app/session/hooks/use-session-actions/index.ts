@@ -184,6 +184,7 @@ import {
   preserveLocalPendingTurnMessages,
   reconcileDurableHistory,
   removeRepresentedLocalLiveProjection,
+  resolveDurableRowIdForMessage,
   resolveResumedBusy,
   resolveSessionProfile,
   resolveStoredSession,
@@ -238,24 +239,24 @@ const branchMessagesFingerprint = (messages: BranchMessage[]): string =>
 // flight instead of minting a second child. The OWNER is part of the identity:
 // the same parent id served by two connections is two different sessions.
 function branchCreateKey({
-  branchCount,
   branchMessages,
   cwd,
   ownerRoute,
   parentStoredId,
   profile,
-  sourceSessionId
+  sourceSessionId,
+  upToRowId
 }: {
-  branchCount?: number
   branchMessages: BranchMessage[]
   cwd?: string
   ownerRoute?: SessionOwnerRoute
   parentStoredId: null | string
   profile?: null | string
   sourceSessionId: null | string
+  upToRowId?: number
 }): string {
   return JSON.stringify({
-    branchCount: branchCount ?? null,
+    cutRowId: upToRowId ?? null,
     connectionId: ownerRoute?.connectionId || null,
     cwd: cwd?.trim() || null,
     messages: sourceSessionId ? null : branchMessagesFingerprint(branchMessages),
@@ -2479,8 +2480,8 @@ export function useSessionActions({
       parentStoredId: null | string,
       cwd?: string,
       profile?: null | string,
-      branchCount?: number,
-      ownerRoute?: SessionOwnerRoute
+      ownerRoute?: SessionOwnerRoute,
+      upToRowId?: number
     ): Promise<boolean> => {
       creatingSessionRef.current = true
 
@@ -2518,13 +2519,13 @@ export function useSessionActions({
         // connections is two different sessions, so a route-blind key would
         // coalesce them onto one create.
         const createKey = branchCreateKey({
-          branchCount,
           branchMessages,
           cwd,
           ownerRoute,
           parentStoredId,
           profile,
-          sourceSessionId
+          sourceSessionId,
+          upToRowId
         })
 
         let createFlight = branchCreateFlightsRef.current.get(createKey)
@@ -2533,7 +2534,7 @@ export function useSessionActions({
         if (!createFlight) {
           const branchParams = {
             session_id: sourceSessionId,
-            ...(branchCount !== undefined ? { count: branchCount } : {})
+            ...(upToRowId === undefined ? {} : { up_to_row_id: upToRowId })
           }
 
           const createParams = {
@@ -2547,7 +2548,7 @@ export function useSessionActions({
           createFlight = (
             sourceSessionId
               ? requestBranchGateway<SessionCreateResponse>(
-                  branchCount === undefined ? 'session.branch_whole' : 'session.branch',
+                  upToRowId === undefined ? 'session.branch_whole' : 'session.branch',
                   branchParams
                 ).catch(err => {
                   if (!isMissingRpcMethod(err)) {
@@ -2735,6 +2736,7 @@ export function useSessionActions({
       // backend reads the durable display projection without materializing it in
       // the renderer.
       let authoritativeMessages: ChatMessage[] | null = null
+      let persistedMessages: SessionMessage[] | null = null
       const profile = await resolveSessionProfile(storedSessionId)
 
       // The open chat's exact owner, when its row carries a connection tag.
@@ -2746,6 +2748,7 @@ export function useSessionActions({
       if (messageId && storedSessionId) {
         try {
           const persisted = await getAllSessionMessages(storedSessionId, ownerRoute ?? profile)
+          persistedMessages = persisted.messages
           const hydrated = toChatMessages(persisted.messages)
 
           if (hydrated.length) {
@@ -2782,6 +2785,24 @@ export function useSessionActions({
         return false
       }
 
+      let upToRowId: number | undefined
+
+      if (messageId) {
+        const localIndex = messages.findIndex(message => message.id === messageId)
+        const terminal = localIndex >= 0 ? messages[localIndex] : undefined
+        upToRowId = terminal?.endRowId ?? terminal?.rowId
+
+        if (upToRowId === undefined && localIndex >= 0 && persistedMessages) {
+          upToRowId = resolveDurableRowIdForMessage(messages, localIndex, persistedMessages)
+        }
+
+        if (upToRowId === undefined) {
+          notify({ kind: 'warning', title: copy.nothingToBranch, message: copy.branchNoText })
+
+          return false
+        }
+      }
+
       clearNotifications()
 
       // The open chat's owning profile, NOT the picker's / launch profile —
@@ -2793,8 +2814,8 @@ export function useSessionActions({
         storedSessionId,
         startingCwd,
         profile,
-        messageId ? branchMessages.length : undefined,
-        ownerRoute
+        ownerRoute,
+        upToRowId
       )
     },
     [activeSessionIdRef, busyRef, copy, forkBranch, getRouteToken, selectedStoredSessionIdRef]
@@ -2837,7 +2858,6 @@ export function useSessionActions({
           stored?.id ?? storedSessionId,
           stored?.cwd?.trim(),
           profile,
-          undefined,
           ownerRoute
         )
       } catch (err) {
