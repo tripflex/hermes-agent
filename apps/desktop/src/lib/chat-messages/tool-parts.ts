@@ -812,7 +812,11 @@ function storedToolResultMetadata(toolMessage: SessionMessage): ToolResultMetada
   return typeof metadata.inline_diff === 'string' ? { inline_diff: metadata.inline_diff } : undefined
 }
 
-export function applyStoredToolResult(messages: ChatMessage[], toolMessage: SessionMessage): boolean {
+export function applyStoredToolResult(
+  messages: ChatMessage[],
+  toolMessage: SessionMessage,
+  toolRowId?: number
+): boolean {
   for (let i = messages.length - 1; i >= 0; i -= 1) {
     const message = messages[i]
 
@@ -826,7 +830,14 @@ export function applyStoredToolResult(messages: ChatMessage[], toolMessage: Sess
       continue
     }
 
-    messages[i] = { ...message, parts, serverRowSpan: (message.serverRowSpan ?? 1) + 1 }
+    messages[i] = {
+      ...message,
+      parts,
+      serverRowSpan: (message.serverRowSpan ?? 1) + 1,
+      ...(toolRowId !== undefined && toolRowId > (message.endRowId ?? -Infinity)
+        ? { endRowId: toolRowId }
+        : {})
+    }
 
     return true
   }

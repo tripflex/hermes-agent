@@ -10,6 +10,7 @@ import {
   textPart,
   toChatMessages
 } from '@/lib/chat-messages'
+import type { SessionMessage } from '@/types/hermes'
 import { normalizePersonalityValue } from '@/lib/chat-runtime'
 import { embeddedImageUrls, textWithoutEmbeddedImages } from '@/lib/embedded-images'
 import { parseErrorSurface } from '@/lib/error-surface'
@@ -213,6 +214,7 @@ const _chatMessageFieldsExhaustive: {
 
 const COMPARED_FIELDS = [
   'rowId',
+  'endRowId',
   'persistedTurn',
   'durableComplete',
   'recovered',
@@ -1675,6 +1677,34 @@ export function selectBranchMessages(
   }
 
   return toBranchMessages(authoritativeMessages.slice(0, authoritativeIndex + 1))
+}
+
+const normalizedForkMessageText = (message: ChatMessage): string => chatMessageText(message).replace(/\s+/g, ' ').trim()
+
+/** Resolve a live renderer message to its durable row in the stored transcript. */
+export function resolveDurableRowIdForMessage(
+  messages: ChatMessage[],
+  targetIndex: number,
+  persistedMessages: SessionMessage[]
+): number | undefined {
+  const target = messages[targetIndex]
+
+  if (!target || target.hidden) {
+    return undefined
+  }
+
+  const targetText = normalizedForkMessageText(target)
+
+  if (!targetText) {
+    return undefined
+  }
+
+  const isSameVisibleMessage = (candidate: ChatMessage) =>
+    !candidate.hidden && candidate.role === target.role && normalizedForkMessageText(candidate) === targetText
+  const occurrence = messages.slice(0, targetIndex + 1).filter(isSameVisibleMessage).length
+  const authoritative = toChatMessages(persistedMessages).filter(isSameVisibleMessage)
+
+  return authoritative[occurrence - 1]?.endRowId ?? authoritative[occurrence - 1]?.rowId
 }
 
 export function upsertOptimisticSession(
